@@ -494,7 +494,7 @@ void remove_client(Client * client) {
 
 void client_deliver(Client * client, Packet * packet) {
     bool idle = !client->output_size;
-    int head = packet->size > 65535 ? 10 : packet->size > 256 ? 4 : 2;
+    int head = packet->size > 65535 ? 10 : packet->size > 125 ? 4 : 2;
     client->output_buffer = (char *)realloc(client->output_buffer, client->output_size + packet->size + head);
     char * ptr = client->output_buffer + client->output_size;
     ptr[0] = packet->type == PT_BINARY_PAYLOAD ? 0x82 : 0x81;

@@ -525,6 +525,10 @@ void * wss_worker(void *) {
     epoll = epoll_create(1);
 
     int accept_sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    int reuse = 1;
+    setsockopt(accept_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int));
+
     bind(accept_sock, (sockaddr *)&server_addr, sizeof(server_addr));
     listen(accept_sock, 5);
     fcntl(accept_sock, F_SETFD, fcntl(accept_sock, F_GETFD, 0) | O_NONBLOCK);

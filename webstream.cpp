@@ -11,6 +11,8 @@
 #include <map>
 
 #define HTTP_101 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+#define HTTP_404 "HTTP/1.1 404 Not Found\r\nConnection: close\r\n"
+#define HTTP_200 "HTTP/1.1 200 OK\r\nConnection: close\r\n"
 
 void sec_websocket_accept(const void * src, void * dst) {
     unsigned char * const salt = (unsigned char *)src;
@@ -295,15 +297,26 @@ struct Client {
     int id;
     int sock;
     int upgraded;
+    int requested;
     int input_size;
     int output_size;
     char * input_buffer;
     char * output_buffer;
 };
 
+struct StaticFile {
+    char * path;
+    char * response;
+    int path_size;
+    int response_size;
+    StaticFile * next;
+};
+
 int epoll;
 int wssin[2];
 int wssout[2];
+
+StaticFile * static_files;
 
 std::map<int, Client *> client_map;
 
@@ -313,9 +326,14 @@ void * message_pipe_id = malloc(1);
 
 PyObject * event_names[8];
 
-int client_upgrade(Client * client) {
+int client_response(Client * client) {
+    if (client->requested) {
+        return -1;
+    }
+
     if (client->input_size > 4 && !memcmp(client->input_buffer + client->input_size - 4, "\r\n\r\n", 4)) {
         client->input_buffer[client->input_size - 4] = 0;
+        client->requested = true;
 
         char * ptr = client->input_buffer;
         int state = 0;
@@ -335,7 +353,39 @@ int client_upgrade(Client * client) {
         char * key = strstr(client->input_buffer, "sec-websocket-key:");
 
         if (!key) {
-            return -1;
+            StaticFile * file_ptr = static_files;
+
+            while (file_ptr) {
+                if (!strncmp(client->input_buffer, file_ptr->path, file_ptr->path_size)) {
+                    client->output_buffer = (char *)malloc(file_ptr->response_size);
+                    memcpy(client->output_buffer, file_ptr->response, file_ptr->response_size);
+                    client->output_size = file_ptr->response_size;
+
+                    epoll_event event = {EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP, client};
+                    epoll_ctl(epoll, EPOLL_CTL_MOD, client->sock, &event);
+
+                    free(client->input_buffer);
+                    client->input_buffer = NULL;
+                    client->input_size = 0;
+                    return 0;
+                }
+                file_ptr = file_ptr->next;
+            }
+        }
+
+        if (strncmp(client->input_buffer, "GET / ", 6) || !key) {
+            char result[] = HTTP_404 "Content-Type: text/html\r\nContent-Length: 0\r\n\r\n";
+            client->output_buffer = (char *)malloc(90);
+            memcpy(client->output_buffer, result, 90);
+            client->output_size = 90;
+
+            epoll_event event = {EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP, client};
+            epoll_ctl(epoll, EPOLL_CTL_MOD, client->sock, &event);
+
+            free(client->input_buffer);
+            client->input_buffer = NULL;
+            client->input_size = 0;
+            return 0;
         }
 
         key = key + 18;
@@ -440,7 +490,7 @@ int client_read(Client * client) {
     client->input_size += chunk_size;
 
     if (!client->upgraded) {
-        if (client_upgrade(client)) {
+        if (client_response(client)) {
             return -1;
         }
     } else {
@@ -556,6 +606,7 @@ void * wss_worker(void *) {
                 client->id = new_client_id();
                 client->sock = client_sock;
                 client->upgraded = false;
+                client->requested = false;
 
                 client_map[client->id] = client;
 
@@ -608,13 +659,47 @@ void * wss_worker(void *) {
 }
 
 PyObject * meth_init(PyObject * self, PyObject * args, PyObject * kwargs) {
-    const char * keywords[] = {"host", "port", NULL};
+    const char * keywords[] = {"host", "port", "files", NULL};
 
     const char * host;
     int port;
+    PyObject * files;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sI", (char **)keywords, &host, &port)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sIO!", (char **)keywords, &host, &port, &PyList_Type, &files)) {
         return NULL;
+    }
+
+    for (int i = 0; i < PyList_Size(files); ++i) {
+        PyObject * tup = PyList_GetItem(files, i);
+        if (!PyTuple_CheckExact(tup) || PyTuple_Size(tup) != 3) {
+            return NULL;
+        }
+
+        if (!PyUnicode_CheckExact(PyTuple_GetItem(tup, 0)) || !PyUnicode_CheckExact(PyTuple_GetItem(tup, 1)) || !PyBytes_CheckExact(PyTuple_GetItem(tup, 2))) {
+            return NULL;
+        }
+
+        const char * path = PyUnicode_AsUTF8(PyTuple_GetItem(PyList_GetItem(files, i), 0));
+        const char * mimetype = PyUnicode_AsUTF8(PyTuple_GetItem(PyList_GetItem(files, i), 1));
+        PyObject * content = PyTuple_GetItem(PyList_GetItem(files, i), 2);
+        int size = (int)PyBytes_Size(content);
+
+        StaticFile * new_file = (StaticFile *)malloc(sizeof(StaticFile));
+
+        char temp[1024];
+        int path_size = sprintf(temp, "GET %s ", path);
+        new_file->path_size = path_size;
+        new_file->path = (char *)malloc(path_size);
+        memcpy(new_file->path, temp, path_size);
+
+        int header = sprintf(temp, HTTP_200 "Content-Type: %s\r\nContent-Length: %d\r\n\r\n", mimetype, size);
+        new_file->response_size = header + size;
+        new_file->response = (char *)malloc(header + size);
+        memcpy(new_file->response, temp, header);
+        memcpy(new_file->response + header, PyBytes_AsString(content), size);
+
+        new_file->next = static_files;
+        static_files = new_file;
     }
 
     server_addr.sin_family = AF_INET;

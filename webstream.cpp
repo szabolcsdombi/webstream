@@ -302,6 +302,7 @@ struct Client {
     int output_size;
     char * input_buffer;
     char * output_buffer;
+    Packet packet;
 };
 
 struct StaticFile {
@@ -438,24 +439,42 @@ int client_parse(Client * client) {
         }
 
         uint8_t opcode = ptr[0] & 15;
+        uint8_t fin = ptr[0] & 0x80;
+
         if (opcode == 8) {
             return -1;
         }
 
-        if (opcode == 1 || opcode == 2) {
+        if (opcode == 0 || opcode == 1 || opcode == 2) {
             uint8_t * mask = ptr + head - 4;
             uint8_t * payload = ptr + head;
             for (int i = 0; i < size; ++i) {
                 payload[i] ^= mask[i & 3];
             }
 
-            Packet packet = {};
-            packet.type = opcode == 1 ? PT_TEXT_PAYLOAD : PT_BINARY_PAYLOAD;
-            packet.client = client->id;
-            packet.size = size;
-            packet.data = (char *)malloc(size);
-            memcpy(packet.data, payload, size);
-            write(wssin[1], &packet, sizeof(Packet));
+            if (opcode) {
+                if (client->packet.size) {
+                    return -1;
+                }
+                client->packet.type = opcode == 1 ? PT_TEXT_PAYLOAD : PT_BINARY_PAYLOAD;
+                client->packet.client = client->id;
+                client->packet.size = size;
+                client->packet.data = (char *)malloc(size);
+                memcpy(client->packet.data, payload, size);
+            } else {
+                if (!client->packet.size) {
+                    return -1;
+                }
+                client->packet.data = (char *)realloc(client->packet.data, client->packet.size + size);
+                memcpy(client->packet.data + client->packet.size, payload, size);
+                client->packet.size += size;
+            }
+        }
+
+        if (fin) {
+            write(wssin[1], &client->packet, sizeof(Packet));
+            client->packet.size = 0;
+            client->packet.data = NULL;
         }
 
         left -= head + size;
@@ -529,6 +548,9 @@ void remove_client(Client * client) {
     }
     if (client->output_buffer) {
         free(client->output_buffer);
+    }
+    if (client->packet.data) {
+        free(client->packet.data);
     }
     if (client->upgraded) {
         Packet packet = {};

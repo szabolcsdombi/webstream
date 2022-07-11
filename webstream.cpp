@@ -305,19 +305,9 @@ struct Client {
     Packet packet;
 };
 
-struct StaticFile {
-    char * path;
-    char * response;
-    int path_size;
-    int response_size;
-    StaticFile * next;
-};
-
 int epoll;
 int wssin[2];
 int wssout[2];
-
-StaticFile * static_files;
 
 std::map<int, Client *> client_map;
 
@@ -354,27 +344,6 @@ int client_response(Client * client) {
         char * key = strstr(client->input_buffer, "sec-websocket-key:");
 
         if (!key) {
-            StaticFile * file_ptr = static_files;
-
-            while (file_ptr) {
-                if (!strncmp(client->input_buffer, file_ptr->path, file_ptr->path_size)) {
-                    client->output_buffer = (char *)malloc(file_ptr->response_size);
-                    memcpy(client->output_buffer, file_ptr->response, file_ptr->response_size);
-                    client->output_size = file_ptr->response_size;
-
-                    epoll_event event = {EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP, client};
-                    epoll_ctl(epoll, EPOLL_CTL_MOD, client->sock, &event);
-
-                    free(client->input_buffer);
-                    client->input_buffer = NULL;
-                    client->input_size = 0;
-                    return 0;
-                }
-                file_ptr = file_ptr->next;
-            }
-        }
-
-        if (strncmp(client->input_buffer, "GET / ", 6) || !key) {
             char result[] = HTTP_404 "Content-Type: text/html\r\nContent-Length: 0\r\n\r\n";
             client->output_buffer = (char *)malloc(90);
             memcpy(client->output_buffer, result, 90);
@@ -398,6 +367,15 @@ int client_response(Client * client) {
             return -1;
         }
 
+        if (!strtok(client->input_buffer, " ")) {
+            return -1;
+        }
+
+        char * path = strtok(NULL, " ");
+        if (!path) {
+            return -1;
+        }
+
         char result[] = HTTP_101 "Sec-WebSocket-Accept: ____________________________\r\n\r\n";
         sec_websocket_accept(key, result + 97);
         client->output_buffer = (char *)malloc(129);
@@ -416,6 +394,9 @@ int client_response(Client * client) {
         Packet packet = {};
         packet.type = PT_CONNECTED;
         packet.client = client->id;
+        packet.size = strlen(path);
+        packet.data = (char *)malloc(packet.size);
+        memcpy(packet.data, path, packet.size);
         write(wssin[1], &packet, sizeof(Packet));
     }
 
@@ -681,47 +662,13 @@ void * wss_worker(void *) {
 }
 
 PyObject * meth_init(PyObject * self, PyObject * args, PyObject * kwargs) {
-    const char * keywords[] = {"host", "port", "files", NULL};
+    const char * keywords[] = {"host", "port", NULL};
 
     const char * host;
     int port;
-    PyObject * files;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sIO!", (char **)keywords, &host, &port, &PyList_Type, &files)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sI", (char **)keywords, &host, &port)) {
         return NULL;
-    }
-
-    for (int i = 0; i < PyList_Size(files); ++i) {
-        PyObject * tup = PyList_GetItem(files, i);
-        if (!PyTuple_CheckExact(tup) || PyTuple_Size(tup) != 3) {
-            return NULL;
-        }
-
-        if (!PyUnicode_CheckExact(PyTuple_GetItem(tup, 0)) || !PyUnicode_CheckExact(PyTuple_GetItem(tup, 1)) || !PyBytes_CheckExact(PyTuple_GetItem(tup, 2))) {
-            return NULL;
-        }
-
-        const char * path = PyUnicode_AsUTF8(PyTuple_GetItem(PyList_GetItem(files, i), 0));
-        const char * mimetype = PyUnicode_AsUTF8(PyTuple_GetItem(PyList_GetItem(files, i), 1));
-        PyObject * content = PyTuple_GetItem(PyList_GetItem(files, i), 2);
-        int size = (int)PyBytes_Size(content);
-
-        StaticFile * new_file = (StaticFile *)malloc(sizeof(StaticFile));
-
-        char temp[1024];
-        int path_size = sprintf(temp, "GET %s ", path);
-        new_file->path_size = path_size;
-        new_file->path = (char *)malloc(path_size);
-        memcpy(new_file->path, temp, path_size);
-
-        int header = sprintf(temp, HTTP_200 "Content-Type: %s\r\nContent-Length: %d\r\n\r\n", mimetype, size);
-        new_file->response_size = header + size;
-        new_file->response = (char *)malloc(header + size);
-        memcpy(new_file->response, temp, header);
-        memcpy(new_file->response + header, PyBytes_AsString(content), size);
-
-        new_file->next = static_files;
-        static_files = new_file;
     }
 
     server_addr.sin_family = AF_INET;
@@ -768,13 +715,9 @@ PyObject * meth_recv(PyObject * self) {
     PyObject * res = PyTuple_New(3);
     PyTuple_SET_ITEM(res, 0, PyLong_FromLong(packet.client));
     PyTuple_SET_ITEM(res, 1, event_names[packet.type]);
-
-    if (packet.type == PT_BINARY_PAYLOAD || packet.type == PT_TEXT_PAYLOAD) {
-        PyTuple_SET_ITEM(res, 2, PyBytes_FromStringAndSize(packet.data, packet.size));
+    PyTuple_SET_ITEM(res, 2, PyBytes_FromStringAndSize(packet.data, packet.size));
+    if (packet.data) {
         free(packet.data);
-    } else {
-        Py_INCREF(Py_None);
-        PyTuple_SET_ITEM(res, 2, Py_None);
     }
 
     return res;

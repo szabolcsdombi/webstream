@@ -7,6 +7,6 @@ ext = Extension(
 
 setup(
     name='webstream',
-    version='0.5.0',
+    version='0.6.0',
     ext_modules=[ext],
 )

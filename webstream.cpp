@@ -385,18 +385,18 @@ int client_response(Client * client) {
         epoll_event event = {EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP, client};
         epoll_ctl(epoll, EPOLL_CTL_MOD, client->sock, &event);
 
-        free(client->input_buffer);
-        client->input_buffer = NULL;
-        client->input_size = 0;
-
-        client->upgraded = true;
-
         Packet packet = {};
         packet.type = PT_CONNECTED;
         packet.client = client->id;
         packet.size = strlen(path);
         packet.data = (char *)malloc(packet.size);
         memcpy(packet.data, path, packet.size);
+
+        free(client->input_buffer);
+        client->input_buffer = NULL;
+        client->input_size = 0;
+        client->upgraded = true;
+
         write(wssin[1], &packet, sizeof(Packet));
     }
 
